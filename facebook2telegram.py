@@ -9,8 +9,11 @@ import telegram  # telegram-bot-python
 from telegram.ext import Updater
 from telegram.error import TelegramError, InvalidToken, BadRequest, TimedOut  # Error handling
 
+from flask import Flask, request
 import facebook  # facebook-sdk
 import youtube_dl  # youtube-dl
+
+server = Flask(__name__)
 
 # Logging
 FMT = "[{asctime} {levelname:^9}] {name}: {message}"
@@ -65,150 +68,7 @@ def loadSettings() -> tuple:
     except KeyError:
         logger.critical("Environment variable not found")
         sys.exit('Tokens and ids not found')
-
     return telegram_token, facebook_token, admin_id, channel_id
-
-
-def loadFacebookGraph(facebook_token):
-    """
-    Initialize Facebook GraphAPI with the token loaded from the settings file
-
-    Args:
-        facebook_token (str): The token needed to access the Facebook GraphAPI.
-    """
-    global GRAPH
-    # TODO: Load facebook in the main function, why separately?
-    GRAPH = facebook.GraphAPI(access_token=facebook_token, version='2.7')
-
-
-def loadTelegramBot(telegram_token):
-    """
-    Initialize Telegram Bot API with the token loaded from the settings file
-    """
-    global BOT
-
-    try:
-        BOT = telegram.Bot(token=telegram_token)
-    except InvalidToken:
-        sys.exit('Fatal Error: Invalid Telegram Token')
-
-
-def parsePostDate(post):
-    """
-    Converts 'created_time' str from a Facebook post to the 'datetime' format
-    """
-    date_format = "%Y-%m-%dT%H:%M:%S+0000"
-    post_date = datetime.strptime(post['created_time'], date_format)
-    return post_date
-
-
-# noinspection PyPep8Naming
-class dateTimeEncoder(json.JSONEncoder):
-    """
-    Converts the 'datetime' type to an ISO timestamp for the JSON dumper
-    """
-
-    def default(self, o):
-        if isinstance(o, datetime):
-            serial = o.isoformat()  # Save in ISO format
-            return serial
-
-        raise TypeError('Unknown type')
-
-
-def dateTimeDecoder(pairs, date_format="%Y-%m-%dT%H:%M:%S"):
-    """
-    Converts the ISO timestamp to 'datetime' type for the JSON loader
-    """
-    d = {}
-
-    for k, v in pairs:
-        if isinstance(v, str):
-            try:
-                d[k] = datetime.strptime(v, date_format)
-            except ValueError:
-                d[k] = v
-        else:
-            d[k] = v
-
-    return d
-
-
-def loadDatesJSON(last_posts_dates, filename):
-    """
-    Loads the .json file containing the latest post's date for every page
-    loaded from the settings file to the 'last_posts_dates' dict
-    """
-    with open(filename, 'r') as f:
-        loaded_json = json.load(f, object_pairs_hook=dateTimeDecoder)
-
-    print('Loaded JSON file.')
-    return loaded_json
-
-
-def dumpDatesJSON(last_posts_dates, filename):
-    """
-    Dumps the 'last_posts_dates' dict to a .json file containing the
-    latest post's date for every page loaded from the settings file.
-    """
-    with open(filename, 'w') as f:
-        json.dump(last_posts_dates, f,
-                  sort_keys=True, indent=4, cls=dateTimeEncoder)
-
-    print('Dumped JSON file.')
-    return True
-
-
-def getMostRecentPostsDates(facebook_pages, filename):
-    """
-    Gets the date for the most recent post for every page loaded from the
-    settings file. If there is a 'dates.json' file, load it. If not, fetch
-    the dates from Facebook and store them in the 'dates.json' file.
-    The .json file is used to keep track of the latest posts posted to
-    Telegram in case the bot is restarted after being down for a while.
-    """
-    print('Getting most recent posts dates...')
-
-    # TODO: Remove the function, the bot will only run on feed update (at least so is the plan)
-
-    global start_time
-    global last_posts_dates
-
-    last_posts = GRAPH.get_objects(
-        ids=facebook_pages,
-        fields='name,posts.limit(1){created_time}')
-
-    print('Trying to load JSON file...')
-
-    try:
-        last_posts_dates = loadDatesJSON(last_posts_dates, filename)
-
-        for page in facebook_pages:
-            if page not in last_posts_dates:
-                print('Checking if page ' + page + ' went online...')
-
-                try:
-                    last_post = last_posts[page]['posts']['data'][0]
-                    last_posts_dates[page] = parsePostDate(last_post)
-                    print('Page: ' + last_posts[page]['name'] + ' went online.')
-                    dumpDatesJSON(last_posts_dates, filename)
-                except KeyError:
-                    print('Page ' + page + ' not found.')
-
-        start_time = 0.0  # Makes the job run its callback function immediately
-
-    except (IOError, ValueError):
-        print('JSON file not found or corrupted, fetching latest dates...')
-
-        for page in facebook_pages:
-            try:
-                last_post = last_posts[page]['posts']['data'][0]
-                last_posts_dates[page] = parsePostDate(last_post)
-                print('Checked page: ' + last_posts[page]['name'])
-            except KeyError:
-                print('Page ' + page + ' not found.')
-
-        dumpDatesJSON(last_posts_dates, filename)
 
 
 def getDirectURLVideo(video_id):
@@ -274,8 +134,7 @@ def postVideoToChat(post, post_message, bot, chat_id):
     *First option":  Direct video source
     *Second option": Direct video source from youtube-dl
     *Third option":  Direct video source with smaller resolution
-    "Fourth option": Download file locally for upload
-    "Fifth option":  Send the video link
+    "Fourth option": Send the video link
     """
     # If youtube link, post the link
     if 'caption' in post and post['caption'] == 'youtube.com':
@@ -487,5 +346,19 @@ def main(new_post_id: str):
     # updater.idle()
 
 
+@server.route('/webhook', methods=['POST', 'GET'])
+def webhook():
+    if request.method == "POST":
+        logger.info('A POST request received:')
+        if "post_id" in request.json:
+            main(request.json['post_id'])
+        return 'success', 200
+    else:
+        # abort(400)
+        logger.info(request.args["hub.challenge"])
+        msg = request.args["hub.challenge"] if request.args["hub.challenge"] is not None else "waiting"
+        return msg, 200
+
+
 if __name__ == '__main__':
-    main()
+    server.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
