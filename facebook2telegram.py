@@ -1,14 +1,9 @@
 # coding=utf-8
-import ast  # Used for pages list in ini
-import configparser  # Used for loading configs
 import json  # Used for tacking last dates
 import logging  # Used for logging
-from os import remove
-from os import path
+import os
 import sys  # Used for exiting the program
-from time import sleep
 from datetime import datetime  # Used for date comparison
-from urllib import request  # Used for downloading media
 
 import telegram  # telegram-bot-python
 from telegram.ext import Updater
@@ -18,13 +13,13 @@ import facebook  # facebook-sdk
 import youtube_dl  # youtube-dl
 
 # Logging
-FMT = "[{asctime} {levelname:^7}] {name}: {message}"
+FMT = "[{asctime} {levelname:^9}] {name}: {message}"
 FORMATS = {
     logging.DEBUG: FMT,
     logging.INFO: f'\33[36m{FMT}\33[0m',
     logging.WARNING: f'\33[33m{FMT}\33[0m',
     logging.ERROR: f'\33[31m{FMT}\33[0m',
-    logging.CRITICAL: f'\33[1m;31m{FMT}\33[0m',
+    logging.CRITICAL: f'\33[1m\33[31m{FMT}\33[0m',
 }
 
 
@@ -41,8 +36,6 @@ logging.basicConfig(
     level=logging.DEBUG,
     handlers=[handler])
 logger = logging.getLogger(__name__)
-logger.warning("A warning message")
-logger.info("A info message")
 
 # Global Variables
 # TODO: Remove the global variables that don't really need to be global
@@ -51,105 +44,53 @@ logger.info("A info message")
 ydl = youtube_dl.YoutubeDL({'outtmpl': '%(id)s%(ext)s'})
 
 settings = {}
-dir_path = None
-settings_path = None
-dates_path = None
-graph: facebook.GraphAPI
-start_time = None
-facebook_pages = None
-last_posts_dates = {}
-bot = None
-updater = None
-dispatcher = None
-job_queue = None
+GRAPH: facebook.GraphAPI
+BOT: telegram.Bot
 
 
-def loadSettingsFile(filename):
+def loadSettings() -> tuple:
     """
-    Loads the settings from the .ini file
-    and stores them in global variables.
-    Use example.botsettings.ini as an example.
+    Gets the needed settings from the environment variables.
+
+    Returns: a tuple containing telegram_token, facebook_token, admin_id, and channel_id
     """
-    # TODO: Use environment variables instead of a file
-
-    # Read config file
-    config = configparser.SafeConfigParser()
-    config.read(filename)
-
-    global settings
 
     # Load config
     try:
-        settings['locale'] = config.get('facebook', 'locale')
-        settings['facebook_token'] = config.get('facebook', 'token')
-        settings['facebook_pages'] = ast.literal_eval(
-            config.get("facebook", "pages"))
-        settings['facebook_refresh_rate'] = float(
-            config.get('facebook', 'refreshrate'))
-        settings['allow_status'] = config.getboolean('facebook', 'status')
-        settings['allow_photo'] = config.getboolean('facebook', 'photo')
-        settings['allow_video'] = config.getboolean('facebook', 'video')
-        settings['allow_link'] = config.getboolean('facebook', 'link')
-        settings['allow_shared'] = config.getboolean('facebook', 'shared')
-        settings['allow_message'] = config.getboolean('facebook', 'message')
-        settings['telegram_token'] = config.get('telegram', 'token')
-        settings['channel_id'] = config.get('telegram', 'channel')
-        settings['admin_id'] = config.get('telegram', 'admin')
+        admin_id = os.environ['ADMIN']
+        channel_id = os.environ['CHANNEL']
+        telegram_token = os.environ['TG_TOKEN']
+        facebook_token = os.environ['FB_TOKEN']
 
-        print('Loaded settings:')
-        print('Locale: ' + settings['locale'])
-        if settings['admin_id']:
-            print('Admin ID: ' + settings['admin_id'])
-        print('Channel: ' + settings['channel_id'])
-        print('Refresh rate: ' + str(settings['facebook_refresh_rate']))
-        print('Allow Status: ' + str(settings['allow_status']))
-        print('Allow Photo: ' + str(settings['allow_photo']))
-        print('Allow Video: ' + str(settings['allow_video']))
-        print('Allow Link: ' + str(settings['allow_link']))
-        print('Allow Shared: ' + str(settings['allow_shared']))
-        print('Allow Message: ' + str(settings['allow_message']))
+    except KeyError:
+        logger.critical("Environment variable not found")
+        sys.exit('Tokens and ids not found')
 
-    except configparser.NoSectionError:
-        sys.exit('Fatal Error: Missing or invalid settings file.')
-
-    except configparser.NoOptionError:
-        sys.exit('Fatal Error: Missing or invalid option in settings file.')
-
-    except ValueError:
-        sys.exit('Fatal Error: Missing or invalid value in settings file.')
-
-    except SyntaxError:
-        sys.exit('Fatal Error: Syntax error in page list.')
+    return telegram_token, facebook_token, admin_id, channel_id
 
 
 def loadFacebookGraph(facebook_token):
     """
     Initialize Facebook GraphAPI with the token loaded from the settings file
+
+    Args:
+        facebook_token (str): The token needed to access the Facebook GraphAPI.
     """
-    global graph
+    global GRAPH
     # TODO: Load facebook in the main function, why separately?
-    graph = facebook.GraphAPI(access_token=facebook_token, version='2.7')
+    GRAPH = facebook.GraphAPI(access_token=facebook_token, version='2.7')
 
 
 def loadTelegramBot(telegram_token):
     """
     Initialize Telegram Bot API with the token loaded from the settings file
     """
-    global bot
-    global updater
-    global dispatcher
-    global job_queue
+    global BOT
 
     try:
-        bot = telegram.Bot(token=telegram_token)
+        BOT = telegram.Bot(token=telegram_token)
     except InvalidToken:
         sys.exit('Fatal Error: Invalid Telegram Token')
-
-    # TODO: Look what updater means
-
-    updater = Updater(token=telegram_token)
-    dispatcher = updater.dispatcher
-    job_queue = updater.job_queue
 
 
 def parsePostDate(post):
@@ -233,7 +174,7 @@ def getMostRecentPostsDates(facebook_pages, filename):
     global start_time
     global last_posts_dates
 
-    last_posts = graph.get_objects(
+    last_posts = GRAPH.get_objects(
         ids=facebook_pages,
         fields='name,posts.limit(1){created_time}')
 
@@ -275,7 +216,7 @@ def getDirectURLVideo(video_id):
     Get direct URL for the video using GraphAPI and the post's 'object_id'
     """
     print('Getting direct URL...')
-    video_post = graph.get_object(
+    video_post = GRAPH.get_object(
         id=video_id,
         fields='source')
 
@@ -318,38 +259,11 @@ def postPhotoToChat(post, post_message, bot, chat_id):
     except (BadRequest, TimedOut):
         """If the picture can't be sent using its URL,
         it is downloaded locally and uploaded to Telegram."""
-        try:
-            print('Sending by URL failed, downloading file...')
-            request.urlretrieve(direct_link, dir_path + '/temp.jpg')
-            print('Sending file...')
-            with open(dir_path + '/temp.jpg', 'rb') as picture:
-                message = bot.send_photo(
-                    chat_id=chat_id,
-                    photo=picture,
-                    caption=post_message)
-            remove(dir_path + '/temp.jpg')  # Delete the temp picture
-            return message
-
-        except TimedOut:
-            """If there is a timeout, try again with a higher
-            timeout value for 'bot.send_photo' """
-            print('File upload timed out, trying again...')
-            print('Sending file...')
-            with open(dir_path + '/temp.jpg', 'rb') as picture:
-                message = bot.send_photo(
-                    chat_id=chat_id,
-                    photo=picture,
-                    caption=post_message,
-                    timeout=120)
-            remove(dir_path + '/temp.jpg')  # Delete the temp picture
-            return message
-
-        except BadRequest:
-            print('Could not send photo file, sending link...')
-            bot.send_message(  # Send direct link as a message
-                chat_id=chat_id,
-                text=direct_link + '\n' + post_message)
-            return message
+        print('Could not send photo file, sending link...')
+        message = bot.send_message(  # Send direct link as a message
+            chat_id=chat_id,
+            text=direct_link + '\n' + post_message)
+        return message
 
 
 def postVideoToChat(post, post_message, bot, chat_id):
@@ -422,7 +336,7 @@ def postLinkToChat(post, post_message, bot, chat_id):
         text=post_link + '\n' + post_message)
 
 
-def checkIfAllowedAndPost(post, bot, chat_id):
+def postNewPost(post, bot, chat_id) -> bool:
     """
     Checks the type of the Facebook post and if it's allowed by the
     settings file, then calls the appropriate function for each type.
@@ -430,13 +344,13 @@ def checkIfAllowedAndPost(post, bot, chat_id):
     # If it's a shared post, call this function for the parent post
     if 'parent_id' in post and settings['allow_shared']:
         print('This is a shared post.')
-        parent_post = graph.get_object(
+        parent_post = GRAPH.get_object(
             id=post['parent_id'],
             fields='created_time,type,message,full_picture,story,\
                     source,link,caption,parent_id,object_id',
             locale=settings['locale'])
         print('Accessing parent post...')
-        checkIfAllowedAndPost(parent_post, bot, chat_id)
+        postNewPost(parent_post, bot, chat_id)
         return True
 
     """If there's a message in the post, and it's allowed by the
@@ -492,117 +406,40 @@ def checkIfAllowedAndPost(post, bot, chat_id):
         return False
 
 
-def postToChat(post, bot, chat_id):
-    """
-    Calls another function for posting and checks if it returns True.
-    """
-    if checkIfAllowedAndPost(post, bot, chat_id):
-        print('Posted.')
-
-
-def postNewPosts(new_posts_total, chat_id):
-    global last_posts_dates
-    new_posts_total_count = len(new_posts_total)
-
-    # Distribute posts between Facebook checks
-    if new_posts_total_count > 0:
-        time_to_sleep = settings['facebook_refresh_rate'] / new_posts_total_count
-    else:
-        time_to_sleep = 0
-
-    print('Posting {} new posts to Telegram...'.format(new_posts_total_count))
-    for post in new_posts_total:
-        posts_page = post['page']
-        print('Posting NEW post from page {}...'.format(posts_page))
-        try:
-            if checkIfAllowedAndPost(post, bot, chat_id):
-                print('Posted.')
-            last_posts_dates[posts_page] = parsePostDate(post)
-            dumpDatesJSON(last_posts_dates, dates_path)
-        except BadRequest:
-            print('Error: Telegram could not send the message')
-            # raise
-            continue
-        print('Waiting {} seconds before next post...'.format(time_to_sleep))
-        sleep(int(time_to_sleep))
-
-
-def getNewPosts(facebook_pages, pages_dict, last_posts_dates):
-    # Iterate every page in the list loaded from the settings file
-    new_posts_total = []
-    for page in facebook_pages:
-        try:
-            print('Getting list of posts for page {}...'.format(
-                pages_dict[page]['name']))
-
-            # List of last 25 posts for current page. Every post is a dict.
-            posts_data = pages_dict[page]['posts']['data']
-
-            # List of posts posted after "last posted date" for current page
-            new_posts = list(filter(
-                lambda post: parsePostDate(post) > last_posts_dates[page],
-                posts_data))
-
-            if not new_posts:
-                print('No new posts for this page.')
-                continue  # Goes to next iteration (page)
-            else:
-                print('Found {} new posts for this page.'.format(len(new_posts)))
-                for post in new_posts:  # For later identification
-                    post['page'] = page
-                new_posts_total = new_posts_total + new_posts
-        # If 'page' is not present in 'pages_dict' returned by the GraphAPI
-        except KeyError:
-            print('Page not found.')
-            continue
-    print('Checked all pages.')
-
-    # Sorts the list of new posts in chronological order
-    new_posts_total.sort(key=lambda post: parsePostDate(post))
-    print('Sorted posts by chronological order.')
-
-    return new_posts_total
-
-
-def periodicCheck(bot, job):
+def periodicCheck(bot, new_post_id: str, chat_id: str, admin_id: str):
     """
     Checks for new posts for every page in the list loaded from the
     settings file, posts them, and updates the dates.json file, which
     contains the date for the latest post posted to Telegram for every
     page.
     """
-    global last_posts_dates
-    chat_id = job.context
-    print('Accessing Facebook...')
+    logger.info('Accessing Facebook...')
 
     try:
         # Request to the GraphAPI with all the pages (list) and required fields
-        pages_dict = graph.get_objects(
-            ids=facebook_pages,
+        new_post_dict = GRAPH.get_object(
+            id=new_post_id,
             fields='name,\
-                    posts{\
+                    feed{\
                           created_time,type,message,full_picture,story,\
-                          source,link,caption,parent_id,object_id}',
-            locale=settings['locale'])
+                          source,link,caption,parent_id,object_id}')
 
         # If there is an admin chat ID in the settings file
-        if settings['admin_id']:
+        if admin_id is not None:
             try:
                 # Sends a message to the bot Admin confirming the action
                 bot.send_message(
-                    chat_id=settings['admin_id'],
+                    chat_id=admin_id,
                     text='Successfully fetched Facebook posts.')
-
             except TelegramError:
-                print('Admin ID not found.')
-                print('Successfully fetched Facebook posts.')
-
+                logger.warning('Admin ID not found.')
+                logger.info('Successfully fetched Facebook posts.')
         else:
-            print('Successfully fetched Facebook posts.')
+            logger.info('Successfully fetched Facebook posts.')
 
     # Error in the Facebook API
     except facebook.GraphAPIError:
-        print('Error: Could not get Facebook posts.')
+        logger.error('Error: Could not get Facebook posts.')
         """
         TODO: 'get_object' for every page individually, due to a bug
         in the Graph API that makes some pages return an OAuthException 1,
@@ -614,65 +451,40 @@ def periodicCheck(bot, job):
         """
         return
 
-    new_posts_total = getNewPosts(facebook_pages, pages_dict, last_posts_dates)
+    logger.info('The post was successfully retrieved, let\'s post it')
 
-    print('Checked all posts. Next check in '
-          + str(settings['facebook_refresh_rate'])
-          + ' seconds.')
 
-    postNewPosts(new_posts_total, chat_id)
-
-    if new_posts_total:
-        print('Posted all new posts.')
+    if postNewPost(new_post_dict, chat_id):
+        logger.info('Posted the post')
     else:
-        print('No new posts.')
-
-
-def createCheckJob(bot):
-    """
-    Creates a job that periodically calls the 'periodicCheck' function
-    """
-    # TODO: Remove the function safely
-    job_queue.run_repeating(periodicCheck, settings['facebook_refresh_rate'],
-                            first=start_time, context=settings['channel_id'])
-    print('Job created.')
-    if settings['admin_id']:
-        try:
-            bot.send_message(
-                chat_id=settings['admin_id'],
-                text='Bot Started.')
-        except TelegramError:
-            print('Admin ID not found.')
-            print('Bot Started.')
+        logger.critical('Some error occurred while posting the posts.')
 
 
 def error(bot, update, error):
     logger.warning('Update "{}" caused error "{}"'.format(update, error))
 
 
-def main():
-    global facebook_pages
-    global dir_path
-    global settings_path
-    global dates_path
+def main(new_post_id: str):
+    global GRAPH
 
-    dir_path = path.dirname(path.realpath(__file__))
-    settings_path = dir_path + '/botsettings.ini'
-    dates_path = dir_path + '/dates.json'
+    telegram_token, facebook_token, admin_id, channel_id = loadSettings()
+    GRAPH = facebook.GraphAPI(access_token=facebook_token, version='2.7')
+    try:
+        bot = telegram.Bot(token=telegram_token)
+    except InvalidToken:
+        sys.exit('Fatal Error: Invalid Telegram Token')
 
-    loadSettingsFile(settings_path)
-    loadFacebookGraph(settings['facebook_token'])
-    loadTelegramBot(settings['telegram_token'])
-    facebook_pages = settings['facebook_pages']
-
-    getMostRecentPostsDates(facebook_pages, dates_path)
-
-    createCheckJob(bot)
+    # TODO: Rename the function
+    periodicCheck(bot, new_post_id, channel_id, admin_id)
 
     # Log all errors
+    updater = Updater(token=telegram_token)
+    dispatcher = updater.dispatcher
     dispatcher.add_error_handler(error)
-    updater.start_polling()
-    updater.idle()
+
+    # For now the bot will not be interactive, it will just look for new posts when the server is called.
+    # updater.start_polling()
+    # updater.idle()
 
 
 if __name__ == '__main__':
