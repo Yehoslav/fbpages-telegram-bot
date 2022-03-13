@@ -16,6 +16,7 @@ from flask import Flask, request
 import facebook  # facebook-sdk
 import youtube_dl  # youtube-dl
 
+    # a change that should appear in diff
 server = Flask(__name__)
 
 # Logging
@@ -83,9 +84,7 @@ class Post:
 
 
 def getDirectURLVideoYDL(url) -> str:
-    """
-    Get direct URL for the video
-    """
+    """Get direct URL for the video"""
     return f"youtube.com/watch?v={url.split('?')[0].split('/')[-1]}"
 
 
@@ -126,7 +125,7 @@ def postVideoToChat(bot: telegram.Bot, post: Post, post_message: str, chat_id: s
     """
     # If youtube link, post the link
     if post.caption == 'youtube.com':
-        print('Sending YouTube link...')
+        logger.info('Sending YouTube link...')
         message = bot.send_message(
             chat_id=chat_id,
             text=f"{post.message}\n{getDirectURLVideoYDL(post.media_src)}")
@@ -139,7 +138,7 @@ def postVideoToChat(bot: telegram.Bot, post: Post, post_message: str, chat_id: s
         return message
 
     except TelegramError:  # If the API can't send the video
-        logger.error('Could not send the video. Posting just the message and the link to the post.')
+        logger.warning('Could not send the video. Posting just the message and the link to the post.')
         message = bot.send_message(
             chat_id=chat_id,
             text=post.message
@@ -165,8 +164,7 @@ def postVideoToChat(bot: telegram.Bot, post: Post, post_message: str, chat_id: s
 #         text=post_link + '\n' + post_message)
 
 
-def postNewPost(graph: facebook.GraphAPI,
-                bot: telegram.Bot,
+def postNewPost(bot: telegram.Bot,
                 post: Post,
                 chat_id: str) -> bool:
     """
@@ -174,13 +172,6 @@ def postNewPost(graph: facebook.GraphAPI,
     settings file, then calls the appropriate function for each type.
     """
     # If it's a shared post, call this function for the parent post
-    if post.post_type == PostType.SHARED:
-        logger.info('This is a shared post.')
-        message = bot.send_message(
-            chat_id=chat_id,
-            text='Shared post.'
-        )
-        return True
 
     """If there's a message in the post, and it's allowed by the
     settings file, store it in 'post_message', which will be passed to
@@ -190,8 +181,6 @@ def postNewPost(graph: facebook.GraphAPI,
     else:
         post_message = ''
 
-    # Telegram doesn't allow media captions with more than 200 characters
-    # Send separate message with the post's message
     if (len(post_message) > 200) and \
             (post.post_type == PostType.PHOTO or post.post_type == PostType.VIDEO):
         separate_message = post_message
@@ -201,19 +190,26 @@ def postNewPost(graph: facebook.GraphAPI,
         separate_message = ''
         send_separate = False
 
-    if post.post_type == PostType.PHOTO:
+    # Telegram doesn't allow media captions with more than 200 characters
+    # Send separate message with the post's message
+    if post.post_type == PostType.SHARED:
+        logger.info('This is a shared post.')
+        tg_message = bot.send_message(
+            chat_id=chat_id,
+            text='Shared post.')
+    elif post.post_type == PostType.PHOTO:
         logger.info('Posting photo...')
-        media_message = postPhotoToChat(bot, post, post_message, chat_id)
+        tg_message = postPhotoToChat(bot, post, post_message, chat_id)
         if send_separate:
-            media_message.reply_text(separate_message)
+            tg_message.reply_text(separate_message)
     elif post.post_type == PostType.VIDEO:
         logger.info('Posting video...')
-        media_message = postVideoToChat(bot, post, post_message, chat_id)
+        tg_message = postVideoToChat(bot, post, post_message, chat_id)
         if send_separate:
-            media_message.reply_text(separate_message)
+            tg_message.reply_text(separate_message)
     elif post.post_type == PostType.STATUS:
         logger.info('Posting status...')
-        media_message = bot.send_message(
+        tg_message = bot.send_message(
             chat_id=chat_id,
             text=post.message)
     else:
@@ -226,11 +222,11 @@ def postNewPost(graph: facebook.GraphAPI,
             url=post.permalink
         )]]
     )
-    media_message.edit_reply_markup(markup)
+    tg_message.edit_reply_markup(markup)
     return True
 
 
-def get_facebook_post(graph: facebook.GraphAPI, post_id: str):
+def get_facebook_post(graph: facebook.GraphAPI, post_id: str) -> tuple[Optional[dict], str]:
     try:
         # Request to the GraphAPI with all the pages (list) and required fields
         post = graph.get_object(
@@ -275,9 +271,9 @@ def main(new_post_id: str):
     dispatcher = updater.dispatcher
     dispatcher.add_error_handler(error)
 
-    # new_post, logg_msg = get_facebook_post(graph, new_post_id)
-    logg_msg = 'Testing'
-    new_post = Post(new_post_id)
+    new_post, logg_msg = get_facebook_post(graph, new_post_id)
+    # logg_msg = 'Testing'
+    # new_post = Post(new_post_id)
 
     # If there is an admin chat ID in the settings file
     if admin_id is not None:
@@ -285,17 +281,19 @@ def main(new_post_id: str):
             # Sends a message to the bot Admin confirming the action
             bot.send_message(
                 chat_id=admin_id,
-                text=logg_msg)
+                text=f'{logg_msg}:{new_post}')
         except TelegramError:
             logger.warning('Admin ID not found.')
             logger.info(logg_msg)
     else:
         logger.info(logg_msg)
 
-    if postNewPost(graph, bot, new_post, channel_id):
-        logger.info('Posted the post')
-    else:
-        logger.critical('Some error occurred while posting the posts.')
+    if new_post is not None:
+        new_post = Post(new_post)
+        if postNewPost(bot, new_post, channel_id):
+            logger.info('Posted the post')
+        else:
+            logger.critical('Some error occurred while posting the posts.')
 
     # For now the bot will not be interactive, it will just look for new posts when the server is called.
     # updater.start_polling()
@@ -306,9 +304,9 @@ def main(new_post_id: str):
 def webhook():
     if request.method == "POST":
         logger.info('A POST request received:')
-        # if "post_id" in request.json:
-        #     main(request.json['post_id'])
-        main(request.json)
+        if "post_id" in request.json:
+            main(request.json['post_id'])
+        # main(request.json)
         return 'success', 200
     else:
         # To validate the Facebook request
