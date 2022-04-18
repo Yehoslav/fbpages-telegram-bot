@@ -16,7 +16,6 @@ from flask import Flask, request
 import facebook  # facebook-sdk
 import youtube_dl  # youtube-dl
 
-    # a change that should appear in diff
 server = Flask(__name__)
 
 # Logging
@@ -38,14 +37,17 @@ class CustomFormatter(logging.Formatter):
 
 
 handler = logging.StreamHandler()
-handler.setFormatter(CustomFormatter())
+# handler.setFormatter(CustomFormatter())
 logging.basicConfig(
-    level=logging.DEBUG,
-    handlers=[handler])
+    level=logging.WARNING,
+    handlers=[handler],
+    # filename='facebook2telegram.log'
+)
 logger = logging.getLogger(__name__)
 
 # youtube-dl
 ydl = youtube_dl.YoutubeDL({'outtmpl': '%(id)s%(ext)s'})
+ADMIN: int
 
 
 # graph: facebook.GraphAPI
@@ -57,6 +59,12 @@ class PostType(Enum):
     VIDEO = enum.auto()
     SHARED = enum.auto()
     STATUS = enum.auto()
+    LINK = enum.auto()
+
+
+class Status(Enum):
+    ERROR = 0
+    SUCCESS = 1
 
 
 class Post:
@@ -75,45 +83,78 @@ class Post:
                 self.media_src = post['attachments']['data'][0]['media']['image']['src']
             else:
                 self.media_src = None
+        if post['type'] == 'link':
+            if 'attachments' in post:
+                self.post_type = PostType.LINK
+                self.atth_url = post['attachments']['data'][0]['url']
 
         elif post['type'] == 'photo':
             self.media_src = post['attachments']['data'][0]['media']['image']['src']
 
         elif post['type'] == 'video':
-            self.media_src = post['attachments']['data'][0]['media']['source']
+            if self.caption == "youtube.com":
+                self.media_src = post['attachments']['data'][0]['media']['source']
+            else:
+                self.media_src = post['attachments']['data'][0]['url']
 
 
-def getDirectURLVideoYDL(url) -> str:
-    """Get direct URL for the video"""
-    return f"youtube.com/watch?v={url.split('?')[0].split('/')[-1]}"
+def with_caption(func):
+    def wrapper(bot: telegram.Bot, direct_link, post_message: str, chat_id,):
+        if len(post_message) > 200:
+            separate_message = post_message
+            post_message = ''
+            send_separate = True
+        else:
+            separate_message = ''
+            send_separate = False
+
+        message: Optional[telegram.Message]
+        message = func(bot, direct_link, post_message, chat_id)
+
+        if send_separate and message is not None:
+            message = message.reply_text(text=separate_message, quote=True)
+        elif send_separate and message is None:
+            message = bot.send_message(chat_id, text=separate_message + f'\n[link direct]({direct_link})',
+                                       parse_mode='Markdown')
+        elif message is None:
+            message = bot.send_message(chat_id, text=post_message + f'\n[media]({direct_link})', parse_mode='Markdown')
+
+        return message
+
+    return wrapper
 
 
+@with_caption
 def postPhotoToChat(bot: telegram.Bot,
-                    post: Post,
-                    post_message: str, chat_id: str) -> telegram.Message:
+                    direct_link: str,
+                    post_message: str,
+                    chat_id: str,
+                    ) -> Optional[telegram.Message]:
     """
     Posts the post's picture with the appropriate caption.
     """
-    direct_link = post.media_src
-
     try:
         message = bot.send_photo(
             chat_id=chat_id,
             photo=direct_link,
             caption=post_message)
         return message
-
-    except (BadRequest, TimedOut):
-        """If the picture can't be sent using its URL,
-        it is downloaded locally and uploaded to Telegram."""
-        print('Could not send photo file, sending link...')
-        message = bot.send_message(  # Send direct link as a message
-            chat_id=chat_id,
-            text=direct_link + '\n' + post_message)
-        return message
+    except BadRequest as e:
+        bot.send_message(ADMIN, text=f'Could not send the photo.\n {e}')
+        return None
 
 
-def postVideoToChat(bot: telegram.Bot, post: Post, post_message: str, chat_id: str):
+def getDirectURLVideoYDL(url) -> str:
+    """Get direct URL for the video"""
+    return f"youtube.com/watch?v={url.split('?')[0].split('/')[-1]}"
+
+def getDirectURLVideoFB(url) -> str:
+    """Get direct URL for the video"""
+    return f"facebook.com/watch/?v={url.split('/')[-2]}"
+
+@with_caption
+def postVideoToChat(bot: telegram.Bot, direct_link: str, post_message: str, chat_id: str)\
+        -> Optional:
     """
     This function tries to pass 3 different URLs to the Telegram API
     instead of downloading the video file locally to save bandwidth.
@@ -124,26 +165,40 @@ def postVideoToChat(bot: telegram.Bot, post: Post, post_message: str, chat_id: s
     "Fourth option": Send the video link
     """
     # If youtube link, post the link
-    if post.caption == 'youtube.com':
-        logger.info('Sending YouTube link...')
-        message = bot.send_message(
-            chat_id=chat_id,
-            text=f"{post.message}\n{getDirectURLVideoYDL(post.media_src)}")
-        return message
 
     try:
-        message = bot.send_message(
+        logger.info('Post video...')
+        message = bot.send_video(
             chat_id=chat_id,
-            text=post_message)
+            video=direct_link)
         return message
 
-    except TelegramError:  # If the API can't send the video
+    except TelegramError as e:  # If the API can't send the video
+        try:
+            if 'youtube.com' in direct_link:
+                logger.info('Sending YouTube link...')
+                message = bot.send_message(
+                    chat_id=chat_id,
+                    text=f"{post_message}\n{getDirectURLVideoYDL(direct_link)}")
+                return message
+
+            elif 'facebook.com' in direct_link:
+                logger.info('Sending Facebook Directlink...')
+                message = bot.send_message(
+                    chat_id=chat_id,
+                    text=f"{post_message}\n{getDirectURLVideoFB(direct_link)}")
+                return message
+        except TelegramError as e:
+            bot.send_message(
+                chat_id=ADMIN,
+                text=e)
+            return None
+
         logger.warning('Could not send the video. Posting just the message and the link to the post.')
-        message = bot.send_message(
-            chat_id=chat_id,
-            text=post.message
-        )
-        return message
+        bot.send_message(
+            chat_id=ADMIN,
+            text=str(e))
+        return None
 
 
 # def postLinkToChat(bot: telegram.Bot,
@@ -173,22 +228,14 @@ def postNewPost(bot: telegram.Bot,
     """
     # If it's a shared post, call this function for the parent post
 
-    """If there's a message in the post, and it's allowed by the
-    settings file, store it in 'post_message', which will be passed to
-    another function based on the post type."""
-    if post.message is not None:
-        post_message = post.message
-    else:
-        post_message = ''
-
-    if (len(post_message) > 200) and \
-            (post.post_type == PostType.PHOTO or post.post_type == PostType.VIDEO):
-        separate_message = post_message
-        post_message = ''
-        send_separate = True
-    else:
-        separate_message = ''
-        send_separate = False
+    # if (len(post_message) > 200) and \
+    #         (post.post_type == PostType.PHOTO or post.post_type == PostType.VIDEO):
+    #     separate_message = post_message
+    #     post_message = ''
+    #     send_separate = True
+    # else:
+    #     separate_message = ''
+    #     send_separate = False
 
     # Telegram doesn't allow media captions with more than 200 characters
     # Send separate message with the post's message
@@ -199,19 +246,26 @@ def postNewPost(bot: telegram.Bot,
             text='Shared post.')
     elif post.post_type == PostType.PHOTO:
         logger.info('Posting photo...')
-        tg_message = postPhotoToChat(bot, post, post_message, chat_id)
-        if send_separate:
-            tg_message.reply_text(separate_message)
+        tg_message = postPhotoToChat(bot, post.media_src, post.message, chat_id)
+        # if send_separate:
+        #     tg_message.reply_text(separate_message)
     elif post.post_type == PostType.VIDEO:
         logger.info('Posting video...')
-        tg_message = postVideoToChat(bot, post, post_message, chat_id)
-        if send_separate:
-            tg_message.reply_text(separate_message)
+        tg_message = postVideoToChat(bot, post.media_src, post.message, chat_id)
+        # if send_separate and status == Status.SUCCESS:
+        #     tg_message.reply_text(separate_message)
     elif post.post_type == PostType.STATUS:
         logger.info('Posting status...')
         tg_message = bot.send_message(
             chat_id=chat_id,
             text=post.message)
+    elif post.post_type == PostType.LINK:
+        logger.info('Posting link...')
+        tg_message = bot.send_message(
+            chat_id=chat_id,
+            text=post.message + f'\n[{post.caption}]({post.atth_url})',
+            parse_mode='Markdown'
+        )
     else:
         logger.warning('This post is a {}, skipping...'.format(post.post_type))
         return False
@@ -228,40 +282,36 @@ def postNewPost(bot: telegram.Bot,
 
 def get_facebook_post(graph: facebook.GraphAPI, post_id: str) -> tuple[Optional[dict], str]:
     try:
-        # Request to the GraphAPI with all the pages (list) and required fields
+        # Request to the GraphAPI with the post id and the required fields
         post = graph.get_object(
             id=post_id,
-            fields='id,type,attachments,message,permalink_url,caption')
-
+            fields='id,type,attachments{type,url,media,description},message,permalink_url,caption')
         logger.info('The post was successfully retrieved')
 
     # Error in the Facebook API
     except facebook.GraphAPIError as e:
         logger.error('Error: Could not get Facebook posts.')
-        """
-        TODO: 'get_object' for every page individually, due to a bug
-        in the Graph API that makes some pages return an OAuthException 1,
-        which in turn doesn't allow the 'get_objects' method return a dict
-        that has only the working pages, which is the expected behavior
-        when one or more pages in 'facebeook_pages' are offline. One possible
-        workaround is to create an Extended Page Access Token instead of an
-        App Token, with the downside of having to renew it every two months.
-        """
         return None, f"get_facebook_post threw an error:\n{e}"
 
     return post, "Successfully fetched Facebook posts."
 
 
 def error(bot, update, err):
+    bot.send_message(ADMIN, 'Update "{}" caused error "{}"'.format(update, err))
     logger.warning('Update "{}" caused error "{}"'.format(update, err))
 
 
 def main(new_post_id: str):
+    global ADMIN
     # Loading the settings from the environment
-    admin_id = os.environ['ADMIN']
-    channel_id = os.environ['CHANNEL']
-    telegram_token = os.environ['TG_TOKEN']
-    facebook_token = os.environ['FB_TOKEN']
+    server = False
+    ADMIN = os.environ['ADMIN'] if server else 407628660
+    # channel_id = os.environ['CHANNEL'] if server else '-1001649433472'
+    channel_id = ADMIN
+    telegram_token = os.environ['TG_TOKEN'] if server else \
+            '2063032857:AAHMVw8Glz0IU2Z1zaug-iYjpn9CKr-X8_M'
+    facebook_token = os.environ['FB_TOKEN'] if server else  \
+            'EAAEncCS8JxIBAIinLGoyM2qO7h4TCxQsYRmghMZCWRP4CDwcsk80M4T5B9xfv11jhTqY7mwBGLGJZAFhH6JAZAhICpt074LXBO6cwVZBVZB61p0dNcFVbmmUHfkNFZBjhmTZA9wFAZB8gfuqWUF0rU9MwgVbfTvNkf2LbjTbgAjukViZCWnF5zPdl'
 
     graph = facebook.GraphAPI(access_token=facebook_token, version='3.1')
     bot = telegram.Bot(token=telegram_token)
@@ -276,11 +326,11 @@ def main(new_post_id: str):
     # new_post = Post(new_post_id)
 
     # If there is an admin chat ID in the settings file
-    if admin_id is not None:
+    if ADMIN is not None:
         try:
             # Sends a message to the bot Admin confirming the action
             bot.send_message(
-                chat_id=admin_id,
+                chat_id=ADMIN,
                 text=f'{logg_msg}:{new_post}')
         except TelegramError:
             logger.warning('Admin ID not found.')
