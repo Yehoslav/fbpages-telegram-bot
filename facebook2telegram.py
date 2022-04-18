@@ -266,14 +266,10 @@ def send_post_to_tg(new_post_id: str):
     global ADMIN
 
     # Loading the settings from the environment
-    server = False
-    ADMIN = os.environ['ADMIN'] if server else 407628660
-    channel_id = os.environ['CHANNEL'] if server else '-1001649433472'
-    # channel_id = ADMIN
-    telegram_token = os.environ['TG_TOKEN'] if server else \
-            '2063032857:AAHMVw8Glz0IU2Z1zaug-iYjpn9CKr-X8_M'
-    facebook_token = os.environ['FB_TOKEN'] if server else  \
-            'EAAEncCS8JxIBAIinLGoyM2qO7h4TCxQsYRmghMZCWRP4CDwcsk80M4T5B9xfv11jhTqY7mwBGLGJZAFhH6JAZAhICpt074LXBO6cwVZBVZB61p0dNcFVbmmUHfkNFZBjhmTZA9wFAZB8gfuqWUF0rU9MwgVbfTvNkf2LbjTbgAjukViZCWnF5zPdl'
+    ADMIN = os.environ['ADMIN']
+    channel_id = os.environ['CHANNEL']
+    telegram_token = os.environ['TG_TOKEN']
+    facebook_token = os.environ['FB_TOKEN']
 
     graph = facebook.GraphAPI(access_token=facebook_token, version='3.1')
     bot = telegram.Bot(token=telegram_token)
@@ -312,7 +308,3 @@ def send_post_to_tg(new_post_id: str):
             )]]
         )
         tg_message.edit_reply_markup(markup)
-        # if postNewPost(bot, new_post, channel_id):
-        #     logger.info('Posted the post')
-        # else:
-        #     logger.critical('Some error occurred while posting the posts.')
