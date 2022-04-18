@@ -1,20 +1,15 @@
 # coding=utf-8
-import enum
-import json  # Used for tacking last dates
 import logging  # Used for logging
 import os
-import sys  # Used for exiting the program
-from datetime import datetime  # Used for date comparison
-from enum import Enum
 from typing import Optional
+import json
 
 import telegram  # telegram-bot-python
 from telegram.ext import Updater
 from telegram.error import TelegramError, InvalidToken, BadRequest, TimedOut  # Error handling
 
-from flask import Flask, request
+from flask import Flask
 import facebook  # facebook-sdk
-import youtube_dl  # youtube-dl
 
 server = Flask(__name__)
 
@@ -45,43 +40,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# youtube-dl
-ydl = youtube_dl.YoutubeDL({'outtmpl': '%(id)s%(ext)s'})
 ADMIN: int
-
-
-class PostType(Enum):
-    PHOTO = enum.auto()
-    VIDEO = enum.auto()
-    SHARED = enum.auto()
-    STATUS = enum.auto()
-    LINK = enum.auto()
 
 
 class Post:
 
     def __init__(self, post: dict):
         self.post_id = post['id'] if 'id' in post else None
-        self.post_type = PostType[post['type'].upper()] if 'type' in post else None
-        self.message = post['message'] if 'message' in post else None
+        self.message = post['message'] if 'message' in post else ''
+        self.type = post['type'] if 'type' in post else None
         self.permalink: str = post['permalink_url'] if 'permalink_url' in post else None
         self.post_id = post['id'] if 'id' in post else None
         self.caption = post['caption'] if 'caption' in post else None
-        if post['type'] == 'status':
+
+        if self.type == 'status':
             if 'attachments' in post:
-                self.post_type = PostType.SHARED
-                self.media_src = post['attachments']['data'][0]['media']['image']['src']
+                if post['attachments']['data'][0]['type'] == 'file_upload':
+                    self.type = 'file_upload'
+                    self.media_src = post['attachments']['data'][0]['url']
+                else:
+                    self.media_src = post['attachments']['data'][0]['media']['image']['src']
             else:
                 self.media_src = None
-        if post['type'] == 'link':
-            if 'attachments' in post:
-                self.post_type = PostType.LINK
-                self.atth_url = post['attachments']['data'][0]['url']
 
-        elif post['type'] == 'photo':
+        if self.type == 'link':
+            if 'attachments' in post:
+                self.type = 'share'
+                self.media_src = post['attachments']['data'][0]['url']
+
+        elif self.type == 'photo':
             self.media_src = post['attachments']['data'][0]['media']['image']['src']
 
-        elif post['type'] == 'video':
+        elif self.type == 'video':
             if self.caption == "youtube.com":
                 self.media_src = post['attachments']['data'][0]['media']['source']
             else:
@@ -89,45 +79,49 @@ class Post:
 
 
 def with_caption(func):
-    def wrapper(bot: telegram.Bot, direct_link, post_message: str, chat_id,):
-        if len(post_message) > 200:
-            separate_message = post_message
-            post_message = ''
+    def wrapper(
+            bot: telegram.Bot,
+            post: Post,
+            chat_id,
+    ) -> telegram.Message:
+        if len(post.message) > 200:
+            separate_message = post.message
+            post.message = ''
             send_separate = True
         else:
             separate_message = ''
             send_separate = False
 
         message: Optional[telegram.Message]
-        message = func(bot, direct_link, post_message, chat_id)
+        message = func(bot, post, chat_id)
 
         if send_separate and message is not None:
             message = message.reply_text(text=separate_message, quote=True)
         elif send_separate and message is None:
-            message = bot.send_message(chat_id, text=separate_message + f'\n[link direct]({direct_link})',
+            message = bot.send_message(chat_id, text=separate_message + f'\n[link direct]({post.media_src})',
                                        parse_mode='Markdown')
         elif message is None:
-            message = bot.send_message(chat_id, text=post_message + f'\n[media]({direct_link})', parse_mode='Markdown')
+            message = bot.send_message(chat_id, text=post.message + f'\n[media]({post.media_src})',
+                                       parse_mode='Markdown')
 
         return message
-
     return wrapper
 
 
 @with_caption
-def postPhotoToChat(bot: telegram.Bot,
-                    direct_link: str,
-                    post_message: str,
-                    chat_id: str,
-                    ) -> Optional[telegram.Message]:
+def postPhotoToChat(
+        bot: telegram.Bot,
+        post: Post,
+        chat_id: str,
+) -> Optional[telegram.Message]:
     """
     Posts the post's picture with the appropriate caption.
     """
     try:
         message = bot.send_photo(
             chat_id=chat_id,
-            photo=direct_link,
-            caption=post_message)
+            photo=post.media_src,
+            caption=post.message)
         return message
     except BadRequest as e:
         bot.send_message(ADMIN, text=f'Could not send the photo.\n {e}')
@@ -145,40 +139,34 @@ def getDirectURLVideoFB(url) -> str:
 
 
 @with_caption
-def postVideoToChat(bot: telegram.Bot, direct_link: str, post_message: str, chat_id: str)\
+def postVideoToChat(bot: telegram.Bot, post: Post, chat_id: str)\
         -> Optional:
     """
     This function tries to pass 3 different URLs to the Telegram API
     instead of downloading the video file locally to save bandwidth.
-
-    *First option":  Direct video source
-    *Second option": Direct video source from youtube-dl
-    *Third option":  Direct video source with smaller resolution
-    "Fourth option": Send the video link
     """
-    # If youtube link, post the link
 
     try:
         logger.info('Post video...')
         message = bot.send_video(
             chat_id=chat_id,
-            video=direct_link)
+            video=post.media_src)
         return message
 
     except TelegramError as e:  # If the API can't send the video
         try:
-            if 'youtube.com' in direct_link:
+            if 'youtube.com' in post.media_src:
                 logger.info('Sending YouTube link...')
                 message = bot.send_message(
                     chat_id=chat_id,
-                    text=f"{post_message}\n{getDirectURLVideoYDL(direct_link)}")
+                    text=f"{post.message}\n{getDirectURLVideoYDL(post.media_src)}")
                 return message
 
-            elif 'facebook.com' in direct_link:
+            elif 'facebook.com' in post.media_src:
                 logger.info('Sending Facebook Directlink...')
                 message = bot.send_message(
                     chat_id=chat_id,
-                    text=f"{post_message}\n{getDirectURLVideoFB(direct_link)}")
+                    text=f"{post.message}\n{getDirectURLVideoFB(post.media_src)}")
                 return message
         except TelegramError as e:
             bot.send_message(
@@ -193,55 +181,64 @@ def postVideoToChat(bot: telegram.Bot, direct_link: str, post_message: str, chat
         return None
 
 
-def postNewPost(bot: telegram.Bot,
-                post: Post,
-                chat_id: str) -> bool:
-    """
-    Checks the type of the Facebook post and if it's allowed by the
-    settings file, then calls the appropriate function for each type.
-    """
-
-    # Telegram doesn't allow media captions with more than 200 characters
-    # Send separate message with the post's message
-    if post.post_type == PostType.SHARED:
-        logger.info('This is a shared post.')
-        tg_message = bot.send_message(
-            chat_id=chat_id,
-            text='Shared post.')
-    elif post.post_type == PostType.PHOTO:
-        logger.info('Posting photo...')
-        tg_message = postPhotoToChat(bot, post.media_src, post.message, chat_id)
-        # if send_separate:
-        #     tg_message.reply_text(separate_message)
-    elif post.post_type == PostType.VIDEO:
-        logger.info('Posting video...')
-        tg_message = postVideoToChat(bot, post.media_src, post.message, chat_id)
-        # if send_separate and status == Status.SUCCESS:
-        #     tg_message.reply_text(separate_message)
-    elif post.post_type == PostType.STATUS:
-        logger.info('Posting status...')
-        tg_message = bot.send_message(
-            chat_id=chat_id,
-            text=post.message)
-    elif post.post_type == PostType.LINK:
-        logger.info('Posting link...')
-        tg_message = bot.send_message(
-            chat_id=chat_id,
-            text=post.message + f'\n[{post.caption}]({post.atth_url})',
-            parse_mode='Markdown'
-        )
-    else:
-        logger.warning('This post is a {}, skipping...'.format(post.post_type))
-        return False
-
-    markup = telegram.InlineKeyboardMarkup(
-        [[telegram.InlineKeyboardButton(
-            text='Vezi postarea',
-            url=post.permalink
-        )]]
+def postSharedToChat(
+        bot: telegram.Bot,
+        post: Post,
+        chat_id: str,
+) -> telegram.Message:
+    logger.info('Sending shared post...')
+    return bot.send_message(
+        chat_id=chat_id,
+        text=post.permalink
     )
-    tg_message.edit_reply_markup(markup)
-    return True
+
+
+def postLinkToChat(
+        bot: telegram.Bot,
+        post: Post,
+        chat_id: str,
+) -> telegram.Message:
+    logger.info('Sending shared post...')
+    return bot.send_message(
+        chat_id=chat_id,
+        text=post.message + f'\n[{post.caption}]({post.media_src})'
+    )
+
+
+def postStatusToChat(
+        bot: telegram.Bot,
+        post: Post,
+        chat_id: str,
+) -> telegram.Message:
+    logger.info('Sending shared post...')
+    return bot.send_message(
+        chat_id=chat_id,
+        text=post.message
+    )
+
+
+@with_caption
+def postFileToChat(
+        bot: telegram.Bot,
+        post: Post,
+        chat_id
+) -> telegram.Message:
+    logger.info('Posting file to chat...')
+    return bot.send_message(
+        chat_id=chat_id,
+        text=post.message + f'\n[descarca fisier]({post.media_src})',
+        parse_mode='Markdown'
+    )
+
+
+post_type = {
+    "photo": postPhotoToChat,
+    "video": postVideoToChat,
+    "shared": postSharedToChat,
+    "status": postStatusToChat,
+    "link": postLinkToChat,
+    "file_upload": postFileToChat,
+}
 
 
 def get_facebook_post(graph: facebook.GraphAPI, post_id: str) -> tuple[Optional[dict], str]:
@@ -267,11 +264,12 @@ def error(bot, update, err):
 
 def send_post_to_tg(new_post_id: str):
     global ADMIN
+
     # Loading the settings from the environment
     server = False
     ADMIN = os.environ['ADMIN'] if server else 407628660
-    # channel_id = os.environ['CHANNEL'] if server else '-1001649433472'
-    channel_id = ADMIN
+    channel_id = os.environ['CHANNEL'] if server else '-1001649433472'
+    # channel_id = ADMIN
     telegram_token = os.environ['TG_TOKEN'] if server else \
             '2063032857:AAHMVw8Glz0IU2Z1zaug-iYjpn9CKr-X8_M'
     facebook_token = os.environ['FB_TOKEN'] if server else  \
@@ -293,7 +291,7 @@ def send_post_to_tg(new_post_id: str):
             # Sends a message to the bot Admin confirming the action
             bot.send_message(
                 chat_id=ADMIN,
-                text=f'{logg_msg}:{new_post}')
+                text=f'{logg_msg}:{json.dumps(new_post, indent=2)}')
         except TelegramError:
             logger.warning('Admin ID not found.')
             logger.info(logg_msg)
@@ -302,7 +300,19 @@ def send_post_to_tg(new_post_id: str):
 
     if new_post is not None:
         new_post = Post(new_post)
-        if postNewPost(bot, new_post, channel_id):
-            logger.info('Posted the post')
-        else:
-            logger.critical('Some error occurred while posting the posts.')
+
+        post_function = post_type[new_post.type]
+        tg_message = post_function(bot, new_post, channel_id)
+
+        # Add a button with the url to the original post
+        markup = telegram.InlineKeyboardMarkup(
+            [[telegram.InlineKeyboardButton(
+                text='Vezi postarea',
+                url=new_post.permalink
+            )]]
+        )
+        tg_message.edit_reply_markup(markup)
+        # if postNewPost(bot, new_post, channel_id):
+        #     logger.info('Posted the post')
+        # else:
+        #     logger.critical('Some error occurred while posting the posts.')
