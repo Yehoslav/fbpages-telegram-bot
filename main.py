@@ -33,4 +33,4 @@ async def on_message(message):
         await message.channel.send('Hello')
 
 if __name__ == '__main__':
-    client.run('OTQ0MzQzMzEyNDY1Mjg1MTQx.YhAOPg.oBLH9jAhz6Z3pEFZAUIM6QaZbWk')
+    client.run(os.environ['DI_TOKEN'])
