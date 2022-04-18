@@ -50,10 +50,6 @@ ydl = youtube_dl.YoutubeDL({'outtmpl': '%(id)s%(ext)s'})
 ADMIN: int
 
 
-# graph: facebook.GraphAPI
-# bot: telegram.Bot
-
-
 class PostType(Enum):
     PHOTO = enum.auto()
     VIDEO = enum.auto()
@@ -62,13 +58,7 @@ class PostType(Enum):
     LINK = enum.auto()
 
 
-class Status(Enum):
-    ERROR = 0
-    SUCCESS = 1
-
-
 class Post:
-    post_type: Optional[PostType]
 
     def __init__(self, post: dict):
         self.post_id = post['id'] if 'id' in post else None
@@ -148,9 +138,11 @@ def getDirectURLVideoYDL(url) -> str:
     """Get direct URL for the video"""
     return f"youtube.com/watch?v={url.split('?')[0].split('/')[-1]}"
 
+
 def getDirectURLVideoFB(url) -> str:
     """Get direct URL for the video"""
     return f"facebook.com/watch/?v={url.split('/')[-2]}"
+
 
 @with_caption
 def postVideoToChat(bot: telegram.Bot, direct_link: str, post_message: str, chat_id: str)\
@@ -201,24 +193,6 @@ def postVideoToChat(bot: telegram.Bot, direct_link: str, post_message: str, chat
         return None
 
 
-# def postLinkToChat(bot: telegram.Bot,
-#                    post: Post,
-#                    post_message: str, chat_id: str):
-#     """
-#     Checks if the post has a message with its link in it. If it does,
-#     it sends only the message. If not, it sends the link followed by the
-#     post's message.
-#     """
-#     if post['link'] in post_message:
-#         post_link = ''
-#     else:
-#         post_link = post['link']
-#
-#     bot.send_message(
-#         chat_id=chat_id,
-#         text=post_link + '\n' + post_message)
-
-
 def postNewPost(bot: telegram.Bot,
                 post: Post,
                 chat_id: str) -> bool:
@@ -226,16 +200,6 @@ def postNewPost(bot: telegram.Bot,
     Checks the type of the Facebook post and if it's allowed by the
     settings file, then calls the appropriate function for each type.
     """
-    # If it's a shared post, call this function for the parent post
-
-    # if (len(post_message) > 200) and \
-    #         (post.post_type == PostType.PHOTO or post.post_type == PostType.VIDEO):
-    #     separate_message = post_message
-    #     post_message = ''
-    #     send_separate = True
-    # else:
-    #     separate_message = ''
-    #     send_separate = False
 
     # Telegram doesn't allow media captions with more than 200 characters
     # Send separate message with the post's message
@@ -301,7 +265,7 @@ def error(bot, update, err):
     logger.warning('Update "{}" caused error "{}"'.format(update, err))
 
 
-def main(new_post_id: str):
+def send_post_to_tg(new_post_id: str):
     global ADMIN
     # Loading the settings from the environment
     server = False
@@ -322,8 +286,6 @@ def main(new_post_id: str):
     dispatcher.add_error_handler(error)
 
     new_post, logg_msg = get_facebook_post(graph, new_post_id)
-    # logg_msg = 'Testing'
-    # new_post = Post(new_post_id)
 
     # If there is an admin chat ID in the settings file
     if ADMIN is not None:
@@ -344,26 +306,3 @@ def main(new_post_id: str):
             logger.info('Posted the post')
         else:
             logger.critical('Some error occurred while posting the posts.')
-
-    # For now the bot will not be interactive, it will just look for new posts when the server is called.
-    # updater.start_polling()
-    # updater.idle()
-
-
-@server.route('/webhook', methods=['POST', 'GET'])
-def webhook():
-    if request.method == "POST":
-        logger.info('A POST request received:')
-        if "post_id" in request.json:
-            main(request.json['post_id'])
-        # main(request.json)
-        return 'success', 200
-    else:
-        # To validate the Facebook request
-        logger.info(request.args["hub.challenge"])
-        msg = request.args["hub.challenge"] if request.args["hub.challenge"] is not None else "waiting"
-        return msg, 200
-
-
-if __name__ == '__main__':
-    server.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
